@@ -7,7 +7,6 @@ import requests
 from dotenv import load_dotenv
 from PIL import Image
 import streamlit as st
-import google.generativeai as genai
 import fitz  # PyMuPDF
 import pytesseract
 import pandas as pd
@@ -18,13 +17,16 @@ from itables.streamlit import interactive_table as show_itable
 load_dotenv()
 
 # Read defaults from environment with persistent fallbacks
-DEFAULT_GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyCXUx4IJan48xLgAoEoturQWuQY8wSnELE')
+DEFAULT_BYTEZ_API_KEY = os.getenv('BYTEZ_API_KEY', '')
+DEFAULT_BYTEZ_API_URL = os.getenv('BYTEZ_API_URL', 'https://api.bytez.com/v1/extract')
 DEFAULT_DOLIBARR_API_URL = os.getenv('DOLIBARR_API_URL', 'http://localhost/dolibarr/api/index.php')
 DEFAULT_DOLIBARR_API_KEY = os.getenv('DOLIBARR_API_KEY', 'api_key_admin_2025')
 
 # Init session state with defaults so sidebar is prefilled and persists across reruns
-if 'gemini_api_key' not in st.session_state:
-    st.session_state.gemini_api_key = DEFAULT_GEMINI_API_KEY
+if 'bytez_api_key' not in st.session_state:
+    st.session_state.bytez_api_key = DEFAULT_BYTEZ_API_KEY
+if 'bytez_api_url' not in st.session_state:
+    st.session_state.bytez_api_url = DEFAULT_BYTEZ_API_URL
 if 'dolibarr_url' not in st.session_state:
     st.session_state.dolibarr_url = DEFAULT_DOLIBARR_API_URL
 if 'dolibarr_key' not in st.session_state:
@@ -103,18 +105,13 @@ st.set_page_config(page_title="AI Invoice Extractor", layout="wide")
 
 with st.sidebar:
     st.header("Configuration")
-    # Prefilled inputs from session_state which is pre-populated from env/defaults
-    st.text_input("Gemini API Key", value=st.session_state.gemini_api_key, key="gemini_api_key", type="password")
+    st.text_input("Bytez API Key", value=st.session_state.bytez_api_key, key="bytez_api_key", type="password")
+    st.text_input("Bytez API URL", value=st.session_state.bytez_api_url, key="bytez_api_url")
+    st.text_input("OpenAI API Key", value=os.getenv('OPENAI_API_KEY', ''), key="openai_api_key", type="password")
+    st.text_input("Anthropic API Key", value=os.getenv('ANTHROPIC_API_KEY', ''), key="anthropic_api_key", type="password")
     st.text_input("Dolibarr API URL", value=st.session_state.dolibarr_url, key="dolibarr_url")
     st.text_input("Dolibarr API Key", value=st.session_state.dolibarr_key, key="dolibarr_key", type="password")
     st.caption("These values are loaded from environment variables or defaults and persist during your session.")
-
-# Configure Gemini with the resolved key
-if st.session_state.gemini_api_key:
-    try:
-        genai.configure(api_key=st.session_state.gemini_api_key)
-    except Exception as e:
-        st.warning(f"Gemini configuration issue: {e}")
 
 # Initialize history holders
 if 'extraction_history' not in st.session_state:
@@ -126,6 +123,83 @@ st.title("AI Invoice Extractor")
 
 # Tabs
 tab1, tab2, tab3 = st.tabs(["Upload & Extract", "Review & Export", "History"])
+
+
+def parse_json_from_text(t: str):
+    t = (t or "").strip()
+    # Try direct JSON
+    try:
+        return json.loads(t)
+    except Exception:
+        pass
+    # Try to extract JSON block
+    match = re.search(r"\{[\s\S]*\}$", t)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            pass
+    raise ValueError("Model did not return valid JSON")
+
+
+def extract_with_bytez(prompt: str, file_bytes: bytes, filename: str):
+    """Call Bytez API for extraction. Assumes Bytez accepts multipart file + prompt."""
+    if not st.session_state.bytez_api_key:
+        raise RuntimeError("BYTEZ_API_KEY not set")
+    headers = {"Authorization": f"Bearer {st.session_state.bytez_api_key}"}
+    files = {"file": (filename, file_bytes)}
+    data = {"prompt": prompt}
+    url = st.session_state.bytez_api_url or DEFAULT_BYTEZ_API_URL
+    r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+    r.raise_for_status()
+    # Bytez may already return JSON; if string, try to parse
+    if isinstance(r.json(), dict):
+        return r.json(), "Bytez"
+    return parse_json_from_text(r.text), "Bytez"
+
+
+def extract_with_openai(prompt: str):
+    if not st.session_state.openai_api_key and not os.getenv('OPENAI_API_KEY'):
+        raise RuntimeError("OPENAI_API_KEY not set")
+    key = st.session_state.openai_api_key or os.getenv('OPENAI_API_KEY')
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "Return only a valid JSON object."},
+            {"role": "user", "content": prompt}
+        ]
+    }
+    r = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=60)
+    r.raise_for_status()
+    text = r.json()["choices"][0]["message"]["content"]
+    return parse_json_from_text(text), "OpenAI (gpt-4o-mini)"
+
+
+def extract_with_claude(prompt: str):
+    if not st.session_state.anthropic_api_key and not os.getenv('ANTHROPIC_API_KEY'):
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    key = st.session_state.anthropic_api_key or os.getenv('ANTHROPIC_API_KEY')
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    payload = {
+        "model": "claude-3-haiku-20240307",
+        "max_tokens": 2000,
+        "messages": [
+            {"role": "user", "content": prompt + "\nReturn only the JSON object."}
+        ]
+    }
+    r = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload, timeout=60)
+    r.raise_for_status()
+    text = r.json().get("content", [{}])[0].get("text", "")
+    return parse_json_from_text(text), "Claude (haiku)"
+
 
 with tab1:
     st.subheader("Upload Invoice (PDF/Image)")
@@ -150,114 +224,31 @@ with tab1:
 
         st.image(content, caption="Preview", use_container_width=True) if content else None
 
-        # Primary button still labeled Gemini for UX continuity, but we implement a provider fallback chain.
-        if st.button("Extract with Gemini", use_container_width=True):
-            with st.spinner("Extracting (Gemini -> OpenAI -> Claude fallback)..."):
+        if st.button("Extract with Bytez", use_container_width=True):
+            with st.spinner("Extracting (Bytez -> OpenAI -> Claude fallback)..."):
                 prompt = PROMPT_TEMPLATES[model_name]
 
-                def parse_json_from_text(t: str):
-                    t = (t or "").strip()
-                    # Try direct JSON
-                    try:
-                        return json.loads(t)
-                    except Exception:
-                        pass
-                    # Try to extract JSON block
-                    match = re.search(r"\{[\s\S]*\}$", t)
-                    if match:
-                        try:
-                            return json.loads(match.group(0))
-                        except Exception:
-                            pass
-                    raise ValueError("Model did not return valid JSON")
-
                 data = None
+                provider_used = None
                 errors = []
 
-                # Provider 1: Gemini 2.5 Pro
+                # Provider 1: Bytez (default)
                 try:
-                    # NOTE: Upgraded model from gemini-1.5-flash to gemini-2.5-pro
-                    g_model = genai.GenerativeModel("gemini-2.5-pro")
-                    resp = g_model.generate_content([
-                        prompt,
-                        "Return only the JSON object."
-                    ])
-                    text = resp.text if hasattr(resp, 'text') else (resp.candidates[0].content.parts[0].text if getattr(resp, 'candidates', None) else "")
-                    data = parse_json_from_text(text)
-                    provider_used = "Gemini (gemini-2.5-pro)"
+                    data, provider_used = extract_with_bytez(prompt, file_bytes, uploaded_file.name)
                 except Exception as e:
-                    errors.append(f"Gemini failed: {e}")
+                    errors.append(f"Bytez failed: {e}")
 
-                # Provider 2: OpenAI GPT-5 Mini fallback (pseudo or actual)
+                # Provider 2: OpenAI fallback
                 if data is None:
                     try:
-                        # Pseudo import to avoid hard dependency if not installed
-                        # from openai import OpenAI
-                        # client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-                        # resp = client.chat.completions.create(
-                        #     model="gpt-5-mini",
-                        #     messages=[
-                        #         {"role": "system", "content": "Return only a valid JSON object."},
-                        #         {"role": "user", "content": prompt}
-                        #     ]
-                        # )
-                        # text = resp.choices[0].message.content
-                        # For environments without the SDK, try HTTP fallback if OPENAI_API_KEY present
-                        if os.getenv('OPENAI_API_KEY'):
-                            headers = {
-                                "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
-                                "Content-Type": "application/json",
-                            }
-                            payload = {
-                                "model": "gpt-5-mini",
-                                "messages": [
-                                    {"role": "system", "content": "Return only a valid JSON object."},
-                                    {"role": "user", "content": prompt}
-                                ]
-                            }
-                            r = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload, timeout=30)
-                            r.raise_for_status()
-                            text = r.json()["choices"][0]["message"]["content"]
-                        else:
-                            raise RuntimeError("OPENAI_API_KEY not set")
-                        data = parse_json_from_text(text)
-                        provider_used = "OpenAI (gpt-5-mini)"
+                        data, provider_used = extract_with_openai(prompt)
                     except Exception as e:
                         errors.append(f"OpenAI fallback failed: {e}")
 
-                # Provider 3: Claude Haiku fallback (pseudo or actual)
+                # Provider 3: Claude fallback
                 if data is None:
                     try:
-                        # Pseudo SDK usage commented to keep optional
-                        # import anthropic
-                        # client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
-                        # resp = client.messages.create(
-                        #     model="claude-haiku",
-                        #     max_tokens=2000,
-                        #     messages=[{"role": "user", "content": prompt + "\nReturn only the JSON object."}]
-                        # )
-                        # text = resp.content[0].text
-                        if os.getenv('ANTHROPIC_API_KEY'):
-                            headers = {
-                                "x-api-key": os.getenv('ANTHROPIC_API_KEY'),
-                                "anthropic-version": "2023-06-01",
-                                "content-type": "application/json",
-                            }
-                            payload = {
-                                "model": "claude-haiku",
-                                "max_tokens": 2000,
-                                "messages": [
-                                    {"role": "user", "content": prompt + "\nReturn only the JSON object."}
-                                ]
-                            }
-                            r = requests.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload, timeout=30)
-                            r.raise_for_status()
-                            # Simplified extraction for Haiku v1 messages format
-                            text = r.json().get("content", [{}])[0].get("text", "")
-                        else:
-                            raise RuntimeError("ANTHROPIC_API_KEY not set")
-                        data = parse_json_from_text(text)
-                        provider_used = "Claude (claude-haiku)"
+                        data, provider_used = extract_with_claude(prompt)
                     except Exception as e:
                         errors.append(f"Claude fallback failed: {e}")
 
