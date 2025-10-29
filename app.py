@@ -8,7 +8,6 @@ from dotenv import load_dotenv
 from PIL import Image
 import streamlit as st
 import fitz  # PyMuPDF
-import pytesseract
 import pandas as pd
 import itables
 from itables.streamlit import interactive_table as show_itable
@@ -153,8 +152,12 @@ def extract_with_bytez(prompt: str, file_bytes: bytes, filename: str):
     r = requests.post(url, headers=headers, files=files, data=data, timeout=60)
     r.raise_for_status()
     # Bytez may already return JSON; if string, try to parse
-    if isinstance(r.json(), dict):
-        return r.json(), "Bytez"
+    try:
+        j = r.json()
+        if isinstance(j, dict):
+            return j, "Bytez"
+    except Exception:
+        pass
     return parse_json_from_text(r.text), "Bytez"
 
 
@@ -166,6 +169,7 @@ def extract_with_openai(prompt: str):
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+    # Use a low-cost/free-tier model
     payload = {
         "model": "gpt-4o-mini",
         "messages": [
@@ -188,6 +192,7 @@ def extract_with_claude(prompt: str):
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
+    # Use free/entry model
     payload = {
         "model": "claude-3-haiku-20240307",
         "max_tokens": 2000,
@@ -204,6 +209,15 @@ def extract_with_claude(prompt: str):
 with tab1:
     st.subheader("Upload Invoice (PDF/Image)")
     uploaded_file = st.file_uploader("Upload an invoice file", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=False)
+
+    # Provider selection
+    provider = st.radio(
+        "Select extraction provider",
+        options=["Bytez", "OpenAI", "Claude"],
+        index=0,
+        horizontal=True,
+    )
+
     model_name = st.selectbox("Prompt preset", list(PROMPT_TEMPLATES.keys()))
 
     if uploaded_file:
@@ -222,35 +236,43 @@ with tab1:
         else:
             content = Image.open(io.BytesIO(file_bytes))
 
-        st.image(content, caption="Preview", use_container_width=True) if content else None
+        if content:
+            st.image(content, caption="Preview", use_container_width=True)
 
-        if st.button("Extract with Bytez", use_container_width=True):
-            with st.spinner("Extracting (Bytez -> OpenAI -> Claude fallback)..."):
+        # Action button changes label based on provider
+        btn_label = f"Extract with {provider}"
+        if st.button(btn_label, use_container_width=True):
+            with st.spinner(f"Extracting with {provider}..."):
                 prompt = PROMPT_TEMPLATES[model_name]
-
                 data = None
                 provider_used = None
                 errors = []
 
-                # Provider 1: Bytez (default)
                 try:
-                    data, provider_used = extract_with_bytez(prompt, file_bytes, uploaded_file.name)
-                except Exception as e:
-                    errors.append(f"Bytez failed: {e}")
-
-                # Provider 2: OpenAI fallback
-                if data is None:
-                    try:
+                    if provider == "Bytez":
+                        data, provider_used = extract_with_bytez(prompt, file_bytes, uploaded_file.name)
+                    elif provider == "OpenAI":
                         data, provider_used = extract_with_openai(prompt)
-                    except Exception as e:
-                        errors.append(f"OpenAI fallback failed: {e}")
-
-                # Provider 3: Claude fallback
-                if data is None:
-                    try:
+                    elif provider == "Claude":
                         data, provider_used = extract_with_claude(prompt)
-                    except Exception as e:
-                        errors.append(f"Claude fallback failed: {e}")
+                except Exception as e:
+                    errors.append(f"{provider} failed: {e}")
+
+                # If selected provider failed, offer fallbacks automatically
+                if data is None:
+                    fallback_order = [p for p in ["Bytez", "OpenAI", "Claude"] if p != provider]
+                    for fb in fallback_order:
+                        try:
+                            if fb == "Bytez":
+                                data, provider_used = extract_with_bytez(prompt, file_bytes, uploaded_file.name)
+                            elif fb == "OpenAI":
+                                data, provider_used = extract_with_openai(prompt)
+                            elif fb == "Claude":
+                                data, provider_used = extract_with_claude(prompt)
+                            if data is not None:
+                                break
+                        except Exception as e:
+                            errors.append(f"{fb} fallback failed: {e}")
 
                 if data is not None:
                     st.session_state.extracted_data = data
