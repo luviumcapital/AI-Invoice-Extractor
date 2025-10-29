@@ -13,10 +13,8 @@ import pytesseract
 import pandas as pd
 import itables
 from itables.streamlit import interactive_table as show_itable
-
 # Load environment variables
 load_dotenv()
-
 # --- Dolibarr Integration Function ---
 def send_to_dolibarr(invoice_json):
     """Send extracted invoice JSON to Dolibarr API."""
@@ -50,7 +48,6 @@ def send_to_dolibarr(invoice_json):
         return resp.json() if resp.text else {"status": "success", "message": "Invoice sent to Dolibarr"}
     except Exception as e:
         return {"error": str(e)}
-
 # --- Settings & Presets ---
 PROMPT_TEMPLATES = {
     "General Invoice": """
@@ -103,7 +100,6 @@ List all line items from this invoice in a JSON array. Output ONLY the JSON arra
 If a field is missing, leave it blank. Do not include any text before or after the JSON. Do not use markdown or code blocks. Only output the JSON array, nothing else. Any deviation will break the downstream system.
 """
 }
-
 # --- Initialize Session State ---
 if "api_key" not in st.session_state:
     st.session_state.api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -111,15 +107,12 @@ if "extracted_data" not in st.session_state:
     st.session_state.extracted_data = None
 if "extraction_history" not in st.session_state:
     st.session_state.extraction_history = []
-
 load_dotenv()
-
 # Configure the Gemini API
 if st.session_state.api_key:
     genai.configure(api_key=st.session_state.api_key)
 else:
     genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-
 # --- Streamlit Page Config ---
 st.set_page_config(
     page_title="AI Invoice Extractor + Dolibarr",
@@ -127,10 +120,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
 st.title("🧾 AI Invoice Extractor + Dolibarr Integration")
 st.write("Extract invoice data using AI and automatically send to Dolibarr")
-
 # --- Sidebar Configuration ---
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -140,10 +131,8 @@ with st.sidebar:
     st.subheader("📋 Dolibarr Settings")
     dolibarr_url = st.text_input("Dolibarr API URL:", value=os.environ.get("DOLIBARR_API_URL", ""))
     dolibarr_key = st.text_input("Dolibarr API Key:", value=os.environ.get("DOLIBARR_API_KEY", ""), type="password")
-
 # --- Main Content Area ---
 tab1, tab2, tab3 = st.tabs(["📤 Upload & Extract", "📊 View Results", "📜 History"])
-
 with tab1:
     st.subheader("Upload Invoice Document")
     uploaded_file = st.file_uploader(
@@ -174,7 +163,7 @@ with tab1:
                             images = [Image.open(uploaded_file)]
                         
                         # Extract using Gemini
-                        model = genai.GenerativeModel("gemini-1.5-flash")
+                        model = genai.GenerativeModel("gemini-pro")
                         prompt = PROMPT_TEMPLATES.get(prompt_template)
                         
                         extracted_json_str = ""
@@ -193,7 +182,6 @@ with tab1:
                             st.text_area("Raw Extraction:", extracted_json_str)
                 except Exception as e:
                     st.error(f"❌ Error during extraction: {e}")
-
 with tab2:
     st.subheader("Extracted Invoice Data")
     
@@ -256,7 +244,6 @@ with tab2:
             st.info("No line items found in extraction")
     else:
         st.info("👆 Upload and extract invoice data from the 'Upload & Extract' tab")
-
 with tab3:
     st.subheader("Extraction History")
     if st.session_state.extraction_history:
@@ -271,6 +258,5 @@ with tab3:
                         st.rerun()
     else:
         st.info("No extraction history yet")
-
 st.divider()
 st.caption("🔐 Your API keys are never stored. Environment variables are used for security.")
