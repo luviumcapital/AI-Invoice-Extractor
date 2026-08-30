@@ -1,7 +1,0 @@
-python-dotenv
-Pillow
-streamlit
-google-generativeai
-PyMuPDF
-pytesseract
-itables
